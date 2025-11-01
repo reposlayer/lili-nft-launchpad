@@ -1,3 +1,11 @@
+██╗     ██╗██╗     ██╗     ██████╗██╗     ██╗
+██║     ██║██║     ██║    ██╔════╝██║     ██║
+██║     ██║██║     ██║    ██║     ██║     ██║
+██║     ██║██║     ██║    ██║     ██║     ██║
+███████╗██║███████╗██║    ╚██████╗███████╗██║
+╚══════╝╚═╝╚══════╝╚═╝     ╚═════╝╚══════╝╚═╝
+
+
 # NFT Launchpad Starter
 
 Next.js App Router template for orchestrating Solana NFT drops. Ships with wallet connect UI, drop configuration form, and helper utilities for integrating Bundlr uploads + Metaplex Candy Machine v3 flows.
