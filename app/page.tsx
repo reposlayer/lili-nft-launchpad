@@ -1,139 +1,180 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useState } from "react";
+import { useState } from "react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useWallet } from "@solana/wallet-adapter-react";
-import { scheduleDrop } from "../lib/launchpad";
+import { sol, toMetaplexFileFromBrowser } from "@metaplex-foundation/js";
+import { MintForm, type MintFormValues } from "../components/MintForm";
+import { ListingGrid } from "../components/ListingGrid";
+import { NetworkSelector } from "../components/NetworkSelector";
+import { useMetaplex } from "../hooks/useMetaplex";
+import { useMarketplaceListings } from "../hooks/useMarketplaceListings";
+import { marketplaceConfig, formatCurrency } from "../lib/config";
+import { getAuctionHousePublicKey } from "../lib/marketplace";
 
 export default function Home() {
-  const wallet = useWallet();
-  const [status, setStatus] = useState<string | null>(null);
-  type LaunchFormState = {
-    collectionName: string;
-    symbol: string;
-    price: string;
-    supply: number;
-    startDate: string;
+  const { publicKey, connected } = useWallet();
+  const metaplex = useMetaplex();
+  const { listings, loading, error, refresh, ready } = useMarketplaceListings();
+  const [minting, setMinting] = useState(false);
+  const [purchasingId, setPurchasingId] = useState<string | null>(null);
+  const [banner, setBanner] = useState<string | null>(null);
+
+  const defaultMintValues: MintFormValues = {
+    name: `${marketplaceConfig.title} #${Math.floor(Math.random() * 10_000)}`,
+    symbol: "LILI",
+    description: marketplaceConfig.description,
+    priceSol: marketplaceConfig.defaultPriceSol,
+    royaltyBps: marketplaceConfig.primarySaleFeeBps,
+    file: null
   };
 
-  const [formState, setFormState] = useState<LaunchFormState>({
-    collectionName: "Lili Launch",
-    symbol: "LILI",
-    price: "1",
-    supply: 100,
-    startDate: new Date(Date.now() + 3600_000).toISOString().slice(0, 16)
-  });
+  const handleMint = async (values: MintFormValues) => {
+    if (!connected || !publicKey) {
+      throw new Error("Connect a wallet before minting.");
+    }
+    if (!metaplex) {
+      throw new Error("Metaplex client not ready yet.");
+    }
+    const auctionHouseAddress = getAuctionHousePublicKey();
+    if (!auctionHouseAddress) {
+      throw new Error("Auction House not configured. Run npm run bootstrap:devnet first.");
+    }
+    setMinting(true);
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!wallet.publicKey) {
-      setStatus("Connect a wallet first");
+    try {
+      const assetFile = values.file ? await toMetaplexFileFromBrowser(values.file) : null;
+      if (!assetFile) {
+        throw new Error("Upload an asset to mint.");
+      }
+
+      const { uri } = await metaplex.nfts().uploadMetadata({
+        name: values.name,
+        description: values.description,
+        symbol: values.symbol,
+        image: assetFile,
+        sellerFeeBasisPoints: values.royaltyBps
+      });
+
+      const { nft } = await metaplex.nfts().create({
+        uri,
+        name: values.name,
+        sellerFeeBasisPoints: values.royaltyBps,
+        symbol: values.symbol,
+        isMutable: true
+      });
+
+      const auctionHouse = await metaplex.auctionHouse().findByAddress({ address: auctionHouseAddress });
+
+      await metaplex.auctionHouse().list({
+        auctionHouse,
+        mintAccount: nft.address,
+        seller: publicKey,
+        price: sol(values.priceSol)
+      });
+
+      setBanner(`Listed ${values.name} for ${formatCurrency(values.priceSol)}.`);
+      await refresh();
+    } finally {
+      setMinting(false);
+    }
+  };
+
+  const handlePurchase = async (listing: (typeof listings)[number]) => {
+    if (!marketplaceConfig.enablePurchases) {
+      setBanner("Purchases are disabled via configuration.");
+      return;
+    }
+    if (!connected || !publicKey) {
+      setBanner("Connect a wallet before purchasing.");
+      return;
+    }
+    if (!metaplex) {
+      setBanner("Metaplex client is not ready yet. Try again in a moment.");
+      return;
+    }
+    const auctionHouseAddress = getAuctionHousePublicKey();
+    if (!auctionHouseAddress) {
+      setBanner("Auction House not configured. Run npm run bootstrap:devnet first.");
       return;
     }
 
-    setStatus("Simulating drop creation...");
+    setPurchasingId(listing.id);
+
     try {
-      const result = await scheduleDrop({
-        authority: wallet.publicKey,
-        collectionName: formState.collectionName,
-        symbol: formState.symbol,
-        price: Number(formState.price),
-        maxSupply: formState.supply,
-        goLiveDate: new Date(formState.startDate)
+      const auctionHouse = await metaplex.auctionHouse().findByAddress({ address: auctionHouseAddress });
+      const { bid } = await metaplex.auctionHouse().bid({
+        auctionHouse,
+        mintAccount: listing.listing.asset.address,
+        seller: listing.listing.sellerAddress,
+        tokenAccount: listing.listing.asset.token.address,
+        price: listing.listing.price
       });
-      setStatus(`Generated launch config ${result.configAddress.toBase58()}`);
-    } catch (error: unknown) {
-      setStatus(error instanceof Error ? error.message : String(error));
+
+      await metaplex.auctionHouse().executeSale({ auctionHouse, listing: listing.listing, bid });
+      setBanner(`Purchase successful. You now own ${listing.name}.`);
+      await refresh();
+    } catch (err) {
+      setBanner((err as Error).message ?? "Failed to complete purchase.");
+    } finally {
+      setPurchasingId(null);
     }
   };
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-5xl flex-col gap-8 px-6 py-12">
-      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
-        <div>
-          <p className="text-sm uppercase tracking-[0.4em] text-primary">Launchpad</p>
-          <h1 className="mt-2 text-4xl font-semibold text-white">Mint drop orchestrator</h1>
-          <p className="mt-2 max-w-2xl text-slate-300">
-            Upload art, configure mint price and schedule, and expose ready-made hooks for your front
-            end. This template ships with server routes for asset upload via Bundlr/Irys and Metaplex
-            Candy Machine v3 helpers.
+    <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-10 px-6 py-12">
+      <header className="flex flex-col justify-between gap-6 sm:flex-row sm:items-center">
+        <div className="space-y-4">
+          <p className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.35em] text-primary">
+            Lili Launchpad
+            <NetworkSelector />
           </p>
+          <h1 className="text-4xl font-semibold text-white">{marketplaceConfig.title}</h1>
+          <p className="max-w-2xl text-sm text-slate-300">{marketplaceConfig.description}</p>
         </div>
-        <WalletMultiButton className="w-full rounded bg-primary px-4 py-2 text-sm font-medium text-slate-950 shadow transition hover:bg-primary-dark sm:w-auto" />
+        <WalletMultiButton className="w-full rounded-full bg-primary px-5 py-2 text-sm font-semibold text-slate-950 shadow transition hover:bg-primary-dark sm:w-auto" />
       </header>
 
-      <form
-        className="grid gap-6 rounded-xl border border-white/10 bg-white/5 p-6"
-        onSubmit={handleSubmit}
-      >
-        <div className="grid gap-4 sm:grid-cols-2">
-          <label className="flex flex-col text-sm text-slate-300">
-            Collection name
-            <input
-              className="mt-2 rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
-              value={formState.collectionName}
-              onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                setFormState((prev) => ({ ...prev, collectionName: event.target.value }))
-              }
-            />
-          </label>
-          <label className="flex flex-col text-sm text-slate-300">
-            Symbol
-            <input
-              className="mt-2 rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
-              value={formState.symbol}
-              onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                setFormState((prev) => ({ ...prev, symbol: event.target.value }))
-              }
-            />
-          </label>
+      {banner && (
+        <div className="rounded-xl border border-primary/30 bg-primary/10 p-4 text-sm text-primary">
+          {banner}
         </div>
+      )}
 
-        <div className="grid gap-4 sm:grid-cols-3">
-          <label className="flex flex-col text-sm text-slate-300">
-            Price (SOL)
-            <input
-              className="mt-2 rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
-              type="number"
-              min="0"
-              step="0.01"
-              value={formState.price}
-              onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                setFormState((prev) => ({ ...prev, price: event.target.value }))
-              }
-            />
-          </label>
-          <label className="flex flex-col text-sm text-slate-300">
-            Supply
-            <input
-              className="mt-2 rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
-              type="number"
-              min="1"
-              value={formState.supply}
-              onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                setFormState((prev) => ({ ...prev, supply: Number(event.target.value) }))
-              }
-            />
-          </label>
-          <label className="flex flex-col text-sm text-slate-300">
-            Go-live date
-            <input
-              className="mt-2 rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
-              type="datetime-local"
-              value={formState.startDate}
-              onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                setFormState((prev) => ({ ...prev, startDate: event.target.value }))
-              }
-            />
-          </label>
+      {error && (
+        <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-200">
+          {error}
         </div>
+      )}
 
-        <button className="rounded bg-primary px-4 py-2 text-sm font-semibold text-slate-950 shadow">
-          Generate launch config
-        </button>
+      <section className="grid gap-4">
+        <div>
+          <h2 className="text-xl font-semibold text-white">Mint &amp; list a fixed-price NFT</h2>
+          <p className="text-sm text-slate-400">
+            Assets mint to the connected wallet. Listings post directly to the configured Metaplex Auction House.
+          </p>
+        </div>
+        <MintForm defaultValues={defaultMintValues} loading={minting} onSubmit={handleMint} />
+      </section>
 
-        {status && <p className="text-xs text-slate-400">{status}</p>}
-      </form>
+      <section className="grid gap-4">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-xl font-semibold text-white">Marketplace listings</h2>
+            <p className="text-sm text-slate-400">
+              Powered by Metaplex Auction House —{" "}
+              {ready ? "live data fetched directly from Solana." : "configure your marketplace to load listings."}
+            </p>
+          </div>
+        </div>
+        <ListingGrid
+          listings={listings}
+          loading={loading}
+          onPurchase={handlePurchase}
+          purchasingId={purchasingId}
+          purchasesEnabled={marketplaceConfig.enablePurchases}
+        />
+      </section>
     </main>
   );
 }

@@ -16,7 +16,9 @@
     "types": [
       "node",
       "react",
-      "react-dom"
+      "react-dom",
+      "vitest/globals",
+      "@testing-library/jest-dom"
     ],
     "incremental": true,
     "plugins": [
